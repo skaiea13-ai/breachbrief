@@ -1,0 +1,27 @@
+{
+  "account": {
+    "name": "Northwind Media",
+    "tier": "enterprise",
+    "contract_uptime_pct": 99.9,
+    "billing_period": {
+      "start": "2026-07-01T00:00:00Z",
+      "end": "2026-08-01T00:00:00Z"
+    },
+    "monthly_fee_usd": 42000
+  },
+  "services_under_sla": [
+    "render-api",
+    "asset-cdn",
+    "transcode-queue"
+  ],
+  "incidents": [
+    {
+      "id": "INC-2001",
+      "severity": "SEV3",
+      "service": "render-api",
+      "start": "2026-07-14T02:00:00Z",
+      "end": "2026-07-14T02:09:00Z",
+      "summary": "Brief blip inside the error budget"
+    }
+  ]
+}

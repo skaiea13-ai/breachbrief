@@ -1,0 +1,20 @@
+{
+  "account": {
+    "name": "Northwind Media",
+    "tier": "enterprise",
+    "contract_uptime_pct": 99.9,
+    "billing_period": {"start": "2026-07-01T00:00:00Z", "end": "2026-08-01T00:00:00Z"},
+    "monthly_fee_usd": 42000
+  },
+  "services_under_sla": ["render-api", "asset-cdn", "transcode-queue"],
+  "incidents": [
+    {"id": "INC-1042", "severity": "SEV1",     "service": "render-api",      "start": "2026-07-03T02:14:00Z", "end": "2026-07-03T03:41:00Z", "summary": "Render workers wedged on a poisoned job"},
+    {"id": "INC-1043", "severity": "sev-1",    "service": "render-api",      "start": "2026-07-03T03:10:00Z", "end": "2026-07-03T04:02:00Z", "summary": "Same outage, second ticket opened by on-call"},
+    {"id": "INC-1043", "severity": "P1",       "service": "render-api",      "start": "2026-07-03T03:10:00Z", "end": "2026-07-03T04:02:00Z", "summary": "Duplicate row from the exporter"},
+    {"id": "INC-1051", "severity": "P2",       "service": "asset-cdn",       "start": "2026-07-11T18:00:00Z", "end": null,                    "summary": "Edge cache eviction storm, never formally closed"},
+    {"id": "INC-1062", "severity": "critical", "service": "transcode-queue", "start": "2026-07-19T09:30:00Z", "end": "2026-07-19T14:05:00Z", "summary": "Queue backed up behind a stuck consumer"},
+    {"id": "INC-1077", "severity": "Sev 3",    "service": "internal-wiki",   "start": "2026-07-22T11:00:00Z", "end": "2026-07-22T11:45:00Z", "summary": "Not under SLA, should not affect credit"},
+    {"id": "INC-1080", "severity": "SEV2",     "service": "asset-cdn",       "start": "2026-06-28T22:00:00Z", "end": "2026-07-01T04:30:00Z", "summary": "Started before the period, straddles the boundary"},
+    {"id": "INC-1091", "severity": "",         "service": "render-api",      "start": "2026-07-26T05:00:00Z", "end": "2026-07-26T05:20:00Z", "summary": "Severity field never filled in"}
+  ]
+}
