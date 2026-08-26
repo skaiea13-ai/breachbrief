@@ -95,7 +95,7 @@ breachbrief/agent.py        CLI tying it together
 template/build_template.py  builds the .docx template from source
 template/sla-credit-memo.docx
 fixtures/                   a messy month and a clean one
-tests/                      16 offline tests
+tests/                      21 offline tests
 ```
 
 ## Known issue on the demo environment
