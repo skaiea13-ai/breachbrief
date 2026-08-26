@@ -1,9 +1,9 @@
 """Minimal Doctavian client for the calls this agent actually makes.
 
 Authentication takes two headers, not one. The API key identifies the
-subscription and a Google bearer token identifies the caller; sending only the
-key returns 401 with "Authorization header is missing". Both come from the
-environment so neither is ever written to disk or passed on a command line.
+subscription and a Doctavian-issued OAuth bearer identifies the caller; sending
+only the key returns 401 with "Authorization header is missing". Both come from
+the environment so neither is ever written to disk or passed on a command line.
 """
 from __future__ import annotations
 
@@ -19,17 +19,27 @@ from pathlib import Path
 DEFAULT_BASE_URL = "https://demo.api.doctavian.com"
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 TIMEOUT_SECONDS = 60
+DRIVE_SCOPE_CODES = frozenset({"COPY_FILE_GOOGLEDRIVE_FAILED"})
+DRIVE_SCOPE_REMEDIATION = (
+    "Do not retry this generation. The Doctavian tenant's document-storage "
+    "identity lacks the Google Drive scope required by its copy step. Ask the "
+    "sponsor to repair the tenant or issue a documented replacement "
+    "authorization path, then run a fresh preflight."
+)
 
 
 class DoctavianError(RuntimeError):
     """An API call failed. Carries the codes Doctavian returns for triage."""
 
     def __init__(self, message: str, *, status: int | None = None,
-                 codes: list[str] | None = None, event_ids: list[str] | None = None):
+                 codes: list[str] | None = None, event_ids: list[str] | None = None,
+                 retryable: bool = True, remediation: str | None = None):
         super().__init__(message)
         self.status = status
         self.codes = codes or []
         self.event_ids = event_ids or []
+        self.retryable = retryable
+        self.remediation = remediation
 
 
 def _credentials() -> tuple[str, str]:
@@ -52,21 +62,34 @@ def _describe_error(status: int, body: bytes) -> DoctavianError:
     try:
         payload = json.loads(body)
         error = payload.get("error") or {}
+        if error.get("code"):
+            codes.append(str(error["code"]))
         for inner in error.get("innerErrors") or []:
             if inner.get("code"):
                 codes.append(str(inner["code"]))
             if inner.get("eventId"):
                 event_ids.append(str(inner["eventId"]))
         external = error.get("externalErrors") or []
-        detail = "; ".join(str(e) for e in external) or error.get("message") or detail
+        external_messages = [
+            str(item.get("message") or item.get("userMessage") or item)
+            if isinstance(item, dict) else str(item)
+            for item in external
+        ]
+        detail = "; ".join(external_messages) or error.get("message") or detail
     except (ValueError, AttributeError):
         pass
+    codes = list(dict.fromkeys(codes))
+    event_ids = list(dict.fromkeys(event_ids))
+    drive_scope_blocker = bool(DRIVE_SCOPE_CODES.intersection(codes))
     return DoctavianError(f"HTTP {status}: {detail}", status=status,
-                          codes=codes, event_ids=event_ids)
+                          codes=codes, event_ids=event_ids,
+                          retryable=not drive_scope_blocker,
+                          remediation=DRIVE_SCOPE_REMEDIATION if drive_scope_blocker else None)
 
 
 def _request(method: str, path: str, *, body: bytes | None = None,
-             content_type: str | None = None, base_url: str | None = None) -> dict:
+             content_type: str | None = None, storage_type: str | None = None,
+             base_url: str | None = None) -> dict:
     api_key, token = _credentials()
     url = (base_url or os.environ.get("DOCTAVIAN_BASE_URL") or DEFAULT_BASE_URL) + path
     request = urllib.request.Request(url, data=body, method=method)
@@ -75,6 +98,8 @@ def _request(method: str, path: str, *, body: bytes | None = None,
     request.add_header("Accept", "application/json")
     if content_type:
         request.add_header("Content-Type", content_type)
+    if storage_type:
+        request.add_header("X-Storage-Type", storage_type)
     try:
         with urllib.request.urlopen(
             request, timeout=TIMEOUT_SECONDS, context=ssl.create_default_context()
@@ -111,7 +136,8 @@ def upload_template(path: str | Path) -> str:
     path = Path(path)
     body, content_type = _multipart("file", path.name, path.read_bytes())
     response = _request("POST", "/v1/documents/template/upload",
-                        body=body, content_type=content_type)
+                        body=body, content_type=content_type,
+                        storage_type="document-template")
     return _first_file_id(response, "Template")
 
 
@@ -119,7 +145,8 @@ def upload_data(payload: dict) -> str:
     """Store the reconciled facts and return their URN."""
     raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     response = _request("POST", "/v1/documents/data/upload",
-                        body=raw, content_type="application/json")
+                        body=raw, content_type="application/json",
+                        storage_type="document-data")
     return _first_file_id(response, "Data")
 
 
@@ -145,7 +172,8 @@ def upload_signature_document(path: str | Path) -> str:
     path = Path(path)
     body, content_type = _multipart("file", path.name, path.read_bytes())
     response = _request("POST", "/v1/signatures/document/upload",
-                        body=body, content_type=content_type)
+                        body=body, content_type=content_type,
+                        storage_type="document-input")
     return _first_file_id(response, "Signature document")
 
 

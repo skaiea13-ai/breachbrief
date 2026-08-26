@@ -83,6 +83,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  codes:     {', '.join(error.codes)}", file=sys.stderr)
         if error.event_ids:
             print(f"  event ids: {', '.join(error.event_ids)}", file=sys.stderr)
+        if not error.retryable:
+            print("  retry:     no", file=sys.stderr)
+        if error.remediation:
+            print(f"  next:      {error.remediation}", file=sys.stderr)
         return 1
 
     print("document generated")

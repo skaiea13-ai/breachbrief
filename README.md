@@ -56,7 +56,7 @@ Python 3.11 or newer. No third-party dependencies for the agent itself; `python-
 
 ```bash
 export DOCTAVIAN_API_KEY=your_key
-export DOCTAVIAN_TOKEN=your_google_access_token
+export DOCTAVIAN_TOKEN=your_doctavian_oauth_token
 python3 -m breachbrief.agent fixtures/incidents-messy.json
 ```
 
@@ -74,9 +74,9 @@ python3 template/build_template.py
 
 ### Credentials
 
-Doctavian needs **two** headers, not one. `X-Api-Key` identifies the subscription and `Authorization: Bearer` carries a Google access token identifying the caller. Sending only the key returns `401 Authorization header is missing`.
+Doctavian needs **two** headers, not one. `X-Api-Key` identifies the subscription and `Authorization: Bearer` carries the OAuth token issued for that Doctavian environment. Sending only the key returns `401 Authorization header is missing`.
 
-The API key comes from your Doctavian subscription. The bearer token is the Google access token your Doctavian portal session holds — sign in at your portal and read `google_access_token` from local storage. Both are read from the environment and never written to disk or passed on a command line.
+Use only the API key and bearer supplied through the sponsor-approved Doctavian onboarding or OAuth flow. Demo credentials are scoped to the demo host; a generic Google Cloud access token is not a substitute. Do not scrape tokens from browser storage. The client reads both values from the environment and never writes them to disk or passes them on a command line.
 
 ## Verify
 
@@ -84,7 +84,7 @@ The API key comes from your Doctavian subscription. The bearer token is the Goog
 python3 -m unittest discover -s tests -v
 ```
 
-16 tests, no network. They cover the severity vocabulary, the merge rules (overlapping, touching, fully contained, worst-severity-wins), every rung of the credit ladder, and each messy-input case end to end — including that a month with no incidents still lists every service and owes nothing.
+21 tests, no network. They cover the severity vocabulary, the merge rules (overlapping, touching, fully contained, worst-severity-wins), every rung of the credit ladder, each messy-input case end to end, the documented upload headers and generation payload, and terminal classification of the known demo-tenant storage failure.
 
 ## Layout
 
@@ -108,7 +108,7 @@ COPY_FILE_GOOGLEDRIVE_FAILED
  Request had insufficient authentication scopes."
 ```
 
-Generation copies the template on Google Drive using the caller's Google token, and the token the demo portal issues carries profile scopes only. Uploads and reads never touch Drive and succeed, as does the entire Signatures path. Raised with Doctavian; the client code is unchanged by whichever way it is resolved.
+Uploads succeed with the documented `X-Storage-Type` values and the Signatures path works, but generation still fails inside Doctavian's Google Drive-backed copy step. The client treats this exact code as a non-retryable external blocker so operators do not spend calls repeating it. A live retry is appropriate only after Doctavian repairs the demo tenant or documents and issues a replacement authorization path.
 
 ## Licence
 
