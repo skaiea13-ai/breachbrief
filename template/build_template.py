@@ -1,140 +1,131 @@
-"""Build the SLA credit memo template as a .docx Doctavian can generate from.
+"""Build the merge-field-only BreachBrief SLA credit memo template.
 
-The template carries the document logic, not the agent. The agent hands over a
-reconciled set of facts; every decision about what appears on the page — which
-sections exist, how many rows, what the totals are — is expressed here in
-Doctavian elements and expressions, so one template renders a clean month and a
-catastrophic one correctly without the caller branching.
+The agent resolves and flattens the variable-length incident audit. Doctavian
+shapes the resulting facts into a real document using the direct-field surface
+proven against the sponsor demo tenant.
 """
 from __future__ import annotations
 
 import pathlib
+import re
+from zipfile import ZipFile, ZipInfo
 
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Pt
 
 OUT = pathlib.Path(__file__).resolve().parent / "sla-credit-memo.docx"
+PACKAGE_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 
 
 def para(doc, text: str, *, bold: bool = False, size: int = 10, space_after: int = 4):
-    p = doc.add_paragraph()
-    run = p.add_run(text)
+    paragraph = doc.add_paragraph()
+    run = paragraph.add_run(text)
     run.bold = bold
     run.font.size = Pt(size)
-    p.paragraph_format.space_after = Pt(space_after)
-    return p
+    paragraph.paragraph_format.space_after = Pt(space_after)
+    return paragraph
 
 
-def build() -> pathlib.Path:
+def normalize_package(path: pathlib.Path) -> None:
+    """Remove build-time metadata and make the DOCX byte-reproducible."""
+    with ZipFile(path) as source:
+        members = []
+        for item in source.infolist():
+            name = item.filename
+            if name.startswith(("docProps/", "customXml/")):
+                continue
+            payload = source.read(name)
+            if name == "_rels/.rels":
+                payload = re.sub(
+                    br'<Relationship[^>]+Target="docProps/[^\"]+"[^>]*/>',
+                    b"",
+                    payload,
+                )
+            elif name == "word/_rels/document.xml.rels":
+                payload = re.sub(
+                    br'<Relationship[^>]+Target="\.\./customXml/[^\"]+"[^>]*/>',
+                    b"",
+                    payload,
+                )
+            elif name == "[Content_Types].xml":
+                payload = re.sub(
+                    br'<Override[^>]+PartName="/(?:docProps|customXml)/[^\"]+"[^>]*/>',
+                    b"",
+                    payload,
+                )
+                payload = re.sub(
+                    br'<Default[^>]+Extension="jpeg"[^>]*/>', b"", payload
+                )
+            if name.endswith((".xml", ".rels")):
+                payload = re.sub(br'\s+w:rsid\w*="[^\"]*"', b"", payload)
+                payload = re.sub(br'<w:rsids>.*?</w:rsids>', b"", payload, flags=re.DOTALL)
+                payload = re.sub(br'<w:rsid\s+[^>]*/>', b"", payload)
+                payload = re.sub(br'<w:savePreviewPicture\s*/>', b"", payload)
+                payload = re.sub(br'<w1[45]:docId[^>]*/>', b"", payload)
+                payload = re.sub(
+                    br'\s+w1[45]:(?:paraId|textId)="[^\"]*"', b"", payload
+                )
+            members.append((name, payload, item.compress_type))
+    temporary = path.with_name("." + path.name + ".tmp")
+    with ZipFile(temporary, "w") as target:
+        for name, payload, compression in members:
+            item = ZipInfo(name, date_time=PACKAGE_TIMESTAMP)
+            item.compress_type = compression
+            item.create_system = 3
+            mode = 0o700 if name.endswith("/") else 0o600
+            item.external_attr = mode << 16
+            target.writestr(item, payload, compresslevel=9)
+    temporary.replace(path)
+    path.chmod(0o600)
+
+
+def build(out: pathlib.Path = OUT) -> pathlib.Path:
     doc = Document()
+    doc.core_properties.author = ""
+    doc.core_properties.comments = ""
+    doc.core_properties.keywords = ""
+    doc.core_properties.last_modified_by = ""
+    doc.core_properties.subject = ""
+    doc.core_properties.title = ""
     doc.styles["Normal"].font.name = "Calibri"
     doc.styles["Normal"].font.size = Pt(10)
 
-    # ---- Header -----------------------------------------------------------
     title = doc.add_heading("Service Level Credit Memo", level=0)
     title.alignment = WD_ALIGN_PARAGRAPH.LEFT
     para(doc, "{!Account[0].Name} — {!Account[0].Tier} agreement", bold=True, size=12)
     para(doc,
-         "Billing period {!$format(date(Account[0].PeriodStart), 'date', 'medium')} "
-         "to {!$format(date(Account[0].PeriodEnd), 'date', 'medium')}  ·  "
+         "Billing period {!Account[0].PeriodStart} to {!Account[0].PeriodEnd}  ·  "
          "contract availability {!Account[0].ContractUptimePct}%  ·  "
-         "monthly fee {!$format($toDecimal(Account[0].MonthlyFeeUsd), 'number', 'currency')}")
+         "monthly fee ${!Account[0].MonthlyFeeUsd}")
 
-    # ---- Outcome line: one of two mutually exclusive paragraphs -----------
-    doc.add_paragraph()
-    para(doc, '<mdoc:paragraph name="cleanMonth" hidden="{!$toDecimal(Account[0].BreachCount) > 0}">')
+    doc.add_heading("Reconciled outcome", level=1)
+    para(doc, "{!Account[0].Outcome}", bold=True)
     para(doc,
-         "Every service under this agreement met its availability commitment for the "
-         "period. No credit is owed and no signature is required.", bold=True)
-    para(doc, "</mdoc:paragraph>")
+         "Services reviewed: {!Account[0].ServiceCount}  ·  "
+         "services in breach: {!Account[0].BreachCount}  ·  "
+         "excluded source rows: {!Account[0].ExcludedCount}")
+    para(doc, "Regulatory status: {!Account[0].RegulatoryStatus}")
 
-    para(doc, '<mdoc:paragraph name="breachMonth" hidden="{!$toDecimal(Account[0].BreachCount) == 0}">')
-    para(doc,
-         "{!Account[0].BreachCount} of {!$count(Account[0].Services)} services fell below "
-         "the {!Account[0].ContractUptimePct}% commitment. A credit of "
-         "{!$format($toDecimal(Account[0].TotalCreditUsd), 'number', 'currency')} is owed "
-         "and requires countersignature below.", bold=True)
-    para(doc, "</mdoc:paragraph>")
-
-    # ---- Regulatory notice: only for a long SEV1 --------------------------
-    para(doc, '<mdoc:paragraph name="regulatoryNotice" hidden="{!$Account[0].RegulatoryNotice == false}">')
-    para(doc,
-         "REGULATORY NOTICE — this period contains a severity 1 outage exceeding four "
-         "hours. Notification obligations under the master agreement are triggered.",
-         bold=True)
-    para(doc, "</mdoc:paragraph>")
-
-    # ---- Per-service breakdown -------------------------------------------
-    doc.add_paragraph()
     doc.add_heading("Availability by service", level=1)
-    para(doc, '<mdoc:repeater name="services" value="Account[0].Services" variable="svc">')
+    para(doc, "{!Account[0].ServiceAudit}")
 
-    para(doc, "{!#svc#.name}", bold=True, size=11)
-    para(doc,
-         "Availability {!#svc#.availability_pct}%  ·  "
-         "{!#svc#.down_minutes} minutes down  ·  "
-         "{!#svc#.outage_count} outages reconciled from {!#svc#.ticket_count} tickets  ·  "
-         "worst severity {!#svc#.worst_severity}")
+    doc.add_heading("Reconciled outage audit", level=1)
+    para(doc, "{!Account[0].OutageAudit}")
 
-    para(doc, '<mdoc:paragraph name="svcCredit" hidden="{!$#svc#.breached == false}">')
-    para(doc,
-         "Below commitment. Credit at {!#svc#.credit_rate_pct}% of the monthly fee = "
-         "{!$format($toDecimal(#svc#.credit_usd), 'number', 'currency')}.")
-    para(doc, "</mdoc:paragraph>")
+    doc.add_heading("Excluded source rows", level=1)
+    para(doc, "{!Account[0].ExclusionAudit}")
 
-    para(doc, '<mdoc:paragraph name="svcOk" hidden="{!$#svc#.breached == true}">')
-    para(doc, "Met commitment. No credit for this service.")
-    para(doc, "</mdoc:paragraph>")
-
-    # Nested repeater: the merged outages behind this service's number.
-    para(doc, '<mdoc:repeater name="outages" value="#svc#.outages" variable="out">')
-    para(doc,
-         "    {!#out#.incident_ids}  ·  {!#out#.severity}  ·  "
-         "{!#out#.start} to {!#out#.end}  ·  {!#out#.minutes} min  ·  {!#out#.summary}")
-    para(doc, '<mdoc:text name="mergedNote" italic="true" hidden="{!$toDecimal(#out#.merged_from) &lt; 2}">'
-              "        merged from {!#out#.merged_from} separate tickets covering one outage"
-              "</mdoc:text>")
-    para(doc, "</mdoc:repeater>")
-
-    doc.add_paragraph()
-    para(doc, "</mdoc:repeater>")
-
-    # ---- What was excluded, and why --------------------------------------
-    para(doc, '<mdoc:paragraph name="exclusions" hidden="{!$toDecimal(Account[0].ExcludedCount) == 0}">')
-    doc.add_heading("Excluded from this calculation", level=1)
-    para(doc,
-         "{!Account[0].ExcludedCount} reported rows did not contribute to the credit. "
-         "They are listed so the figure can be audited rather than trusted.")
-    para(doc, "</mdoc:paragraph>")
-
-    para(doc, '<mdoc:repeater name="excluded" value="Account[0].Excluded" variable="ex">')
-    para(doc, "    {!#ex#.id}  ·  {!#ex#.service}  ·  {!#ex#.reason}")
-    para(doc, "</mdoc:repeater>")
-
-    # ---- Totals -----------------------------------------------------------
-    doc.add_paragraph()
     doc.add_heading("Total", level=1)
     para(doc,
-         "Services under agreement: {!$count(Account[0].Services)}  ·  "
-         "in breach: {!Account[0].BreachCount}  ·  "
-         "total downtime {!$sum(Account[0].Services, \"down_minutes\")} minutes of "
-         "{!Account[0].PeriodMinutes} in the period.")
-    para(doc,
-         "Credit payable: {!$format($toDecimal(Account[0].TotalCreditUsd), 'number', 'currency')}",
-         bold=True, size=12)
+         "Period minutes: {!Account[0].PeriodMinutes}  ·  "
+         "reconciled downtime: {!Account[0].TotalDowntimeMinutes} minutes")
+    para(doc, "Credit payable: ${!Account[0].TotalCreditUsd}", bold=True, size=12)
 
-    # ---- Signature block, only when money changes hands -------------------
-    para(doc, '<mdoc:paragraph name="signatureBlock" hidden="{!$toDecimal(Account[0].TotalCreditUsd) == 0}">')
-    doc.add_paragraph()
-    para(doc, "Approved for credit", bold=True, size=11)
-    para(doc, "Service provider representative: ________________________    Date: ____________")
-    para(doc, "{!Account[0].Name} representative: ________________________    Date: ____________")
-    para(doc, "</mdoc:paragraph>")
-
-    para(doc, " ")
-    doc.save(OUT)
-    return OUT
+    out.parent.mkdir(parents=True, exist_ok=True)
+    doc.save(out)
+    normalize_package(out)
+    return out
 
 
 if __name__ == "__main__":

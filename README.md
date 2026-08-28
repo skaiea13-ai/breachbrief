@@ -1,115 +1,91 @@
 # BreachBrief
 
-An agent that turns a month of messy incident tickets into an SLA credit memo, and hands it to Doctavian to sign.
-
-The agent decides what is true. The Doctavian template decides what the document says. That split is deliberate: the hard part of a credit memo is not merging fields into a letter, it is that the same template has to produce a one-line "nothing owed" note for a clean month and a six-section, signature-bearing memo for a bad one, without the caller branching.
+BreachBrief reconciles messy incident tickets into an auditable SLA credit memo, then calls Doctavian to render the result as a one-page PDF.
 
 ## The problem
 
-An on-call rota does not produce clean data. A real month looks like this:
+An incident export cannot be billed as-is. One outage may have two ticket IDs. Rows may be duplicated, incidents can cross a billing boundary, and an open ticket may have no end time. Severity also arrives as `SEV1`, `sev-1`, `P1`, `critical`, `Sev 3`, or blank.
 
-- Severity written six ways: `SEV1`, `sev-1`, `P1`, `critical`, `Sev 3`, and blank.
-- One outage, two tickets, because the second on-call opened their own. Summing both bills the customer twice for the same downtime.
-- A duplicate row from the exporter.
-- An incident nobody ever closed.
-- An outage that started last month and ended in this one.
-- A service that was never under SLA in the first place.
+Those details change the money. Counting overlapping tickets twice inflates downtime. Dropping an open incident understates it. Including a service that is not covered by the agreement creates a credit that the customer was never owed.
 
-You cannot add up downtime until that is resolved, and you cannot put a number in front of a customer that you are unable to defend line by line.
+## How the agent works
 
-## What the agent does
-
-`breachbrief/reconcile.py` normalises the feed and produces the facts:
+`breachbrief/reconcile.py` turns the incident feed into a defensible set of facts:
 
 | Input problem | Resolution |
 | --- | --- |
-| Six spellings of severity | Collapsed to one vocabulary. A blank severity becomes `UNCLASSIFIED` rather than being guessed. |
-| Two tickets, one outage | Overlapping and touching windows merge into a single billable outage that keeps the worst severity and every contributing ticket id. |
-| Duplicate exporter row | Dropped, with the reason recorded. |
-| Never-closed incident | Runs to the end of the billing period. |
-| Outage straddling the month boundary | Clamped to the period that actually carried it. |
-| Service outside the SLA | Excluded from the credit, still listed so the figure can be audited. |
+| Severity has six spellings | Map each known spelling to one value. Keep a blank value as `UNCLASSIFIED`. |
+| Two tickets cover one outage | Merge overlapping or touching windows and retain every source ticket ID. |
+| The exporter duplicated a row | Exclude the duplicate and record the reason. |
+| An incident was never closed | End it at the billing-period boundary. |
+| An outage crosses the month boundary | Count only the time inside the billing period. |
+| A service is outside the SLA | Exclude it from the credit and keep it in the audit. |
 
-It then computes availability per service, walks the credit ladder for the contract tier, and totals what is owed.
+The reconciler computes availability and the contract credit ladder for each service. `breachbrief/agent.py` then writes the variable-length service, outage, and exclusion audits as deterministic lines. It does not ask a language model to guess a severity, duration, or dollar amount.
 
-## Where Doctavian does the real work
+The final upload follows Doctavian's data contract: one root `data` object, locale-formatted strings at every scalar leaf, and the original object and array structure left intact. The client uploads the DOCX template and data, checks for a terminal `201` result with a document URN, downloads the generated document by its GUID, and validates the returned PDF or DOCX before writing it.
 
-Everything about the shape of the output lives in `template/sla-credit-memo.docx`, not in Python. The template holds:
+## What Doctavian does
 
-- **7 conditional paragraphs.** The "no credit owed" line and the "credit owed, signature required" line are mutually exclusive and both live in the template, keyed off `Account[0].BreachCount`. The regulatory notice appears only when a SEV1 ran over four hours. The signature block does not exist at all when the credit is zero.
-- **3 repeaters, one nested.** Services repeat; inside each service, its merged outages repeat. The exclusions list repeats separately.
-- **Conditional inline text.** The "merged from N separate tickets" note only renders on outages that were actually merged, using `hidden` on an `mdoc:text` element.
-- **Calculation in the document.** `$sum` over per-service downtime, `$count` of services, `$format` for currency and dates, `$toDecimal` so numbers add instead of concatenating.
+Doctavian does the document work: it binds the reconciled dataset to `template/sla-credit-memo.docx`, generates the customer-facing memo, stores it, and returns the downloadable PDF. The agent never assembles a PDF itself.
 
-One template, two extremes, no branching in the caller:
+The same template handles both supplied fixtures:
 
-```
-messy month:  3 of 3 services breached, $29,400.00 credit, regulatory notice, 2 rows excluded
-clean month:  0 breaches, $0.00, no notice, no exclusions, no signature block
-```
+| Fixture | Result |
+| --- | --- |
+| `incidents-messy.json` | 3 services in breach, 29,833 reconciled downtime minutes, 2 excluded rows, a regulatory notice, and a `$29,400.00` credit |
+| `incidents-clean.json` | 0 services in breach, 9 downtime minutes, no excluded rows, and a `$0.00` credit |
 
-Then, when a credit is owed, the memo goes to `signatures/envelope/create` with a signature field anchored to the approval line in the generated text. A number this size should not leave the building without a countersignature.
+Both paths were generated and downloaded from the sponsor's demo API. The messy case renders all three service lines, five reconciled outage records, and both exclusions on one page.
 
 ## Run it
 
-Python 3.11 or newer. No third-party dependencies for the agent itself; `python-docx` is only needed if you want to rebuild the template.
+Use Python 3.11 or newer. Obtain an API key and OAuth bearer through the sponsor's Doctavian onboarding flow, then set `DOCTAVIAN_API_KEY` and `DOCTAVIAN_TOKEN` in the environment. The demo tenant uses `https://demo.api.doctavian.com` by default; set `DOCTAVIAN_BASE_URL` only when the sponsor supplies another environment.
 
 ```bash
-export DOCTAVIAN_API_KEY=your_key
-export DOCTAVIAN_TOKEN=your_doctavian_oauth_token
-python3 -m breachbrief.agent fixtures/incidents-messy.json
+python3 -m breachbrief.agent fixtures/incidents-messy.json \
+  --output out/sla-credit-memo.pdf
 ```
 
-Reconcile without calling the API at all:
+The CLI prints the reconciliation summary and stage status. It does not print credentials, upload identifiers, document URNs, or raw API responses. Generated files are written with owner-only permissions.
+
+Run the reconciler without any network call:
 
 ```bash
 python3 -m breachbrief.agent fixtures/incidents-messy.json --dry-run
 ```
 
-Rebuild the template from source:
+`python-docx` is needed only to rebuild the committed template:
 
 ```bash
+python3 -m pip install python-docx
 python3 template/build_template.py
 ```
 
-### Credentials
-
-Doctavian needs **two** headers, not one. `X-Api-Key` identifies the subscription and `Authorization: Bearer` carries the OAuth token issued for that Doctavian environment. Sending only the key returns `401 Authorization header is missing`.
-
-Use only the API key and bearer supplied through the sponsor-approved Doctavian onboarding or OAuth flow. Demo credentials are scoped to the demo host; a generic Google Cloud access token is not a substitute. Do not scrape tokens from browser storage. The client reads both values from the environment and never writes them to disk or passes them on a command line.
-
-## Verify
+## Verify it
 
 ```bash
 python3 -m unittest discover -s tests -v
 ```
 
-21 tests, no network. They cover the severity vocabulary, the merge rules (overlapping, touching, fully contained, worst-severity-wins), every rung of the credit ladder, each messy-input case end to end, the documented upload headers and generation payload, and terminal classification of the known demo-tenant storage failure.
+The 34 network-free tests cover severity normalization, interval merging, boundary handling, every credit tier, presentation flattening, the sponsor's upload contract, generation status checks, download headers, document validation, CLI identifier redaction, and byte-reproducible template packaging.
 
-## Layout
+## Repository layout
 
-```
-breachbrief/reconcile.py    incident feed -> defensible facts
-breachbrief/doctavian.py    API client: template, data, generate, envelope
-breachbrief/agent.py        CLI tying it together
-template/build_template.py  builds the .docx template from source
+```text
+breachbrief/reconcile.py    Incident feed to reconciled facts
+breachbrief/agent.py        CLI and deterministic presentation fields
+breachbrief/doctavian.py    Upload, generation, and download client
+template/build_template.py  Reproducible DOCX template builder
 template/sla-credit-memo.docx
-fixtures/                   a messy month and a clean one
-tests/                      21 offline tests
+fixtures/                   Messy and clean synthetic months
+tests/                      34 network-free tests
 ```
 
-## Known issue on the demo environment
+## Safety boundaries
 
-`documents/document/generate` currently returns 500 on the hackathon demo tenant:
+The fixtures contain synthetic data. Credentials stay in environment variables. The download client accepts only a GUID-backed Doctavian document, caps the response at 25 MB, and checks the file signature before saving it. This demo generates a memo; it does not send a signature request or email anyone.
 
-```
-COPY_FILE_GOOGLEDRIVE_FAILED
-"The service drive has thrown an exception. HttpStatusCode is Forbidden.
- Request had insufficient authentication scopes."
-```
-
-Uploads succeed with the documented `X-Storage-Type` values and the Signatures path works, but generation still fails inside Doctavian's Google Drive-backed copy step. The client treats this exact code as a non-retryable external blocker so operators do not spend calls repeating it. A live retry is appropriate only after Doctavian repairs the demo tenant or documents and issues a replacement authorization path.
-
-## Licence
+## License
 
 MIT.
